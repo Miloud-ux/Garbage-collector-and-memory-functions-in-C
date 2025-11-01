@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <iso646.h> // Parses and -> &&
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
@@ -10,12 +11,13 @@
 #define META_SIZE sizeof(struct block_meta)
 #define MIN_SIZE 8 // For splitting blocks
 
-// === Variables and structs ===
+// === Variables and structs ==
 struct block_meta {
   size_t size;
   struct block_meta *next;
   int free;
-  int magic; // for debugging
+  int marked; // for the GC
+  int magic;  // for debugging
 };
 // Head of the linked list to track all allocated blocks.
 void *global_base = NULL;
@@ -36,6 +38,9 @@ void merge_free_blocks(struct block_meta *head);
 void *realloc(void *ptr, size_t size);
 void shrink_and_split(struct block_meta *block, size_t size);
 struct block_meta *expand_in_place(void *ptr, size_t size);
+
+// === Garbage Collector ===
+static void scan_region(uintptr_t *start_region, uintptr_t *end_region);
 
 // == Debugging ==
 void print_heap(void);
@@ -164,6 +169,7 @@ struct block_meta *request_space(struct block_meta *last, size_t size) {
   }
 
   block->free = 0;
+  block->marked = 1;
   block->size = size;
   block->next = NULL;
   block->magic = 0x12345678;
@@ -213,6 +219,7 @@ void *malloc(size_t size) {
         block->next = new_block;
       }
       block->free = 0;
+      block->marked = 1;
       block->magic = 0x77777777;
     }
   }
@@ -256,6 +263,7 @@ void free(void *ptr) {
   assert(block->magic == 0x77777777 || block->magic == 0x12345678);
 
   block->free = 1;
+  block->marked = 0;
   block->magic = 0x55555555;
 
   // After freeing we merge free blocks
@@ -284,6 +292,7 @@ void shrink_and_split(struct block_meta *block, size_t size) {
         (struct block_meta *)((char *)block + META_SIZE + block->size);
     new_block->size = leftover;
     new_block->free = 1;
+    new_block->marked = 0;
     new_block->magic = 0x55555555;
 
     // insert right after the curent block
@@ -317,6 +326,7 @@ struct block_meta *expand_in_place(void *ptr, size_t size) {
     //  give a bit more than the user wanted so let's move on
 
     target->free = 0;
+    target->marked = 1;
     target->magic = 0x12345678;
 
     size_t remaining =
@@ -331,6 +341,7 @@ struct block_meta *expand_in_place(void *ptr, size_t size) {
           (struct block_meta *)((char *)block + META_SIZE + block->size);
       new_target_block->size = remaining;
       new_target_block->free = 1;
+      new_target_block->marked = 0;
       new_target_block->next = next_target;
       new_target_block->magic = 0x5555555;
       block->next = new_target_block;
@@ -402,3 +413,5 @@ void debug_heap(void) {
   }
   printf("-------------------------------------------------------------\n");
 }
+
+static void scan_region(uintptr_t *start_region, uintptr_t *end_region) {}
