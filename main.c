@@ -40,7 +40,9 @@ void shrink_and_split(struct block_meta *block, size_t size);
 struct block_meta *expand_in_place(void *ptr, size_t size);
 
 // === Garbage Collector ===
+// Function to scan the Stack,BSS and data segment.
 static void scan_region(uintptr_t *start_region, uintptr_t *end_region);
+static void scan_heap(void);
 
 // == Debugging ==
 void print_heap(void);
@@ -414,4 +416,76 @@ void debug_heap(void) {
   printf("-------------------------------------------------------------\n");
 }
 
-static void scan_region(uintptr_t *start_region, uintptr_t *end_region) {}
+static void scan_region(uintptr_t *start_region, uintptr_t *end_region) {
+
+  uintptr_t *start = start_region;
+
+  if (!global_base) {
+    return;
+  }
+
+  // uintptr_t holds the addres of a single memory word (4 or 8 bytes).
+
+  uintptr_t heap_start = (uintptr_t)((struct block_meta *)global_base + 1);
+  uintptr_t heap_end = (uintptr_t)sbrk(0);
+
+  for (; start_region < end_region; start_region++) {
+    uintptr_t heap_address = *start_region;
+
+    if (heap_address >= heap_start && heap_address < heap_end) {
+      struct block_meta *temp = global_base;
+
+      while (temp) {
+        if (heap_address >= (uintptr_t)((struct block_meta *)temp + 1) &&
+            heap_address <
+                (uintptr_t)((char *)temp + sizeof(struct block_meta) +
+                            temp->size)) {
+          temp->marked = 1;
+          break;
+        }
+        temp = temp->next;
+      }
+    }
+  }
+}
+
+static void scan_heap(void) {
+  /* Scan each allocated block and see if it points to any unmakred block
+   * if yes mark that block else skip
+   */
+
+  struct block_meta *temp = global_base;
+
+  if (!global_base) {
+    return;
+  }
+
+  int new_marks;
+
+  do {
+    new_marks = 0;
+    temp = global_base;
+    for (; temp != NULL; temp = temp->next) {
+      if (!temp->marked)
+        continue;
+
+      uintptr_t *payload = (uintptr_t *)(temp + 1);
+      for (size_t i = 0; i < (temp->size) / sizeof(uintptr_t); i++) {
+        uintptr_t candidate = payload[i];
+
+        for (struct block_meta *other_block = global_base; other_block != NULL;
+             other_block = other_block->next) {
+          if (!other_block->marked) {
+            uintptr_t start = (uintptr_t)(other_block + 1);
+            uintptr_t end = (uintptr_t)(other_block + 1 + other_block->size);
+
+            if (candidate >= start && candidate < end) {
+              other_block->marked = 1;
+              new_marks = 1;
+            }
+          }
+        }
+      }
+    }
+  } while (new_marks);
+}
