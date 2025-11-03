@@ -163,8 +163,8 @@ Scanning the heap requires traversing our list of allocated blocks because the h
 modern malloc implementation that uses `mmap`. Although our implementation only uses `sbrk()` so that should
 not be a problem anyways.
 
-
-
+> [!NOTE]
+> Debugging functions and the main function are done by AI
 
 
 
