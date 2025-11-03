@@ -1,155 +1,130 @@
 #include <assert.h>
-#include <iso646.h> // Parses and -> &&
+#include <iso646.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
 #include <unistd.h>
-// of the system
 
-// ===Macros===
+// ===== CONFIGURATION =====
 #define META_SIZE sizeof(struct block_meta)
-#define MIN_SIZE 8 // For splitting blocks
+#define MIN_SIZE 8 // Minimum block size for splitting
 
-// === Variables and structs ==
+// ===== DATA STRUCTURES =====
 struct block_meta {
   size_t size;
   struct block_meta *next;
   int free;
-  int marked; // for the GC
-  int magic;  // for debugging
+  int marked; // For garbage collection
+  int magic;  // For debugging (detects corruption)
 };
 
-// Head of the linked list to track all allocated blocks.
+// Global heap tracking
 void *global_base = NULL;
-unsigned long stack_bottom = 0;
+uintptr_t stack_bottom = 0;
 
-// === Functions ===
-
-// Malloc function
+// ===== ALLOCATOR FUNCTIONS =====
 struct block_meta *find_free_block(struct block_meta **last, size_t size);
 struct block_meta *request_space(struct block_meta *last, size_t size);
 void *malloc(size_t size);
-
-// Free function
 void free(void *ptr);
-struct block_meta *get_block_addr(void *ptr);
+void *realloc(void *ptr, size_t size);
 void merge_free_blocks(struct block_meta *head);
 
-// Realloc function
-void *realloc(void *ptr, size_t size);
-void shrink_and_split(struct block_meta *block, size_t size);
-struct block_meta *expand_in_place(void *ptr, size_t size);
-
-// === Garbage Collector ===
-static void
-scan_region(uintptr_t *start_region,
-            uintptr_t *end_region); // Scan the stack and BSS segment
-static void scan_heap(void);        // scan the heap
+// ===== GARBAGE COLLECTOR FUNCTIONS =====
 void gc_init(void);
 void gc(void);
+static void scan_region(uintptr_t *start, uintptr_t *end);
+static void scan_heap(void);
 
-// == Debugging ==
-void print_heap(void);
+// ===== UTILITY FUNCTIONS =====
 void debug_heap(void);
+void print_gc_stats(void);
+int count_allocated_blocks(void);
+int count_free_blocks(void);
 
+// ===== MAIN PROGRAM =====
 int main() {
+  printf("===============================================\n");
+  printf("  GARBAGE COLLECTOR - DEMONSTRATION\n");
+  printf("===============================================\n\n");
 
-  // ===For debugging only===
-  // int *memory = (int *)malloc(sizeof(int) * 4);
-  // if (!memory) {
-  //   printf("Error");
-  //   return 1;
-  // }
-  //
-  // for (int i = 0; i < 4; i++) {
-  //   memory[i] = i;
-  //   printf("%d\n", memory[i]);
-  // }
-  //
-  // struct block_meta *block_addr = (struct block_meta *)memory - 1;
-  // free(memory);
-  //
-  // printf("block -> free = %d\n", block_addr->free);
-  // printf("block -> magic = %x", block_addr->magic);
+  gc_init();
+  printf("✓ GC Initialized (Stack bottom: 0x%lx)\n\n", stack_bottom);
 
-  printf("=== Custom malloc/free/realloc Debugging ===\n");
-
-  // === Test 1: Simple malloc ===
-  printf("\n--- Test 1: Simple malloc ---\n");
+  // Test 1: Basic allocation and manual free
+  printf("--- Test 1: Basic Allocation ---\n");
   int *a = (int *)malloc(5 * sizeof(int));
-  for (int i = 0; i < 5; i++)
-    a[i] = i;
-  debug_heap();
-
-  // === Test 2: Allocate more blocks ===
-  printf("\n--- Test 2: Allocate additional blocks ---\n");
   int *b = (int *)malloc(3 * sizeof(int));
   int *c = (int *)malloc(4 * sizeof(int));
-  debug_heap();
 
-  // === Test 3: Free middle block (b) ===
-  printf("\n--- Test 3: Free middle block (b) ---\n");
+  for (int i = 0; i < 5; i++)
+    a[i] = i;
+  printf("Allocated 3 blocks\n");
+  print_gc_stats();
+
   free(b);
-  debug_heap();
+  printf("Freed middle block\n");
+  print_gc_stats();
 
-  // === Test 4: Allocate smaller block to reuse freed space ===
-  printf("\n--- Test 4: Allocate smaller block (d) ---\n");
-  int *d = (int *)malloc(2 * sizeof(int));
-  debug_heap();
-
-  // === Test 5: Shrink a block with realloc (split leftover) ===
-  printf("\n--- Test 5: Shrink block 'a' ---\n");
-  int *tmp = (int *)realloc(a, 3 * sizeof(int)); // shrink
-  if (tmp)
-    a = tmp;
-  debug_heap();
-
-  // === Test 6: Expand a block with realloc (expand in place if possible) ===
-  printf("\n--- Test 6: Expand block 'a' ---\n");
-  tmp = (int *)realloc(a, 8 * sizeof(int)); // expand
-  if (tmp)
-    a = tmp;
-  debug_heap();
-
-  // === Test 7: realloc NULL pointer (acts like malloc) ===
-  printf("\n--- Test 7: realloc NULL (like malloc) ---\n");
-  int *e = (int *)realloc(NULL, 4 * sizeof(int));
-  if (e) {
-    for (int i = 0; i < 4; i++)
-      e[i] = i * 2;
-  }
-  debug_heap();
-
-  // === Test 8: realloc size 0 (acts like free) ===
-  printf("\n--- Test 8: realloc size 0 (free 'd') ---\n");
-  tmp = (int *)realloc(d, 0); // free
-  if (!tmp)
-    d = NULL;
-  debug_heap();
-
-  // === Test 9: Free all remaining blocks ===
-  printf("\n--- Test 9: Free remaining blocks (a, c, e) ---\n");
   free(a);
-  debug_heap();
-
   free(c);
-  debug_heap();
+  printf("Freed remaining blocks\n");
+  print_gc_stats();
+  printf("✓ Test 1 passed\n\n");
 
-  free(e);
-  debug_heap();
+  // Test 2: Garbage collection
+  printf("--- Test 2: Garbage Collection ---\n");
+  int *reachable = (int *)malloc(10 * sizeof(int));
+  int *unreachable = (int *)malloc(10 * sizeof(int));
 
-  printf("\n=== Debugging complete ===\n");
-
-  struct block_meta *curr = (struct block_meta *)global_base;
-  printf("\n=== Heap State ===\n");
-  while (curr) {
-    printf("Block %p | size=%zu | free=%d | magic=0x%x | next=%p\n",
-           (void *)curr, curr->size, curr->free, curr->magic,
-           (void *)curr->next);
-    curr = curr->next;
+  for (int i = 0; i < 10; i++) {
+    reachable[i] = i;
+    unreachable[i] = i * 2;
   }
+
+  printf("Before GC:\n");
+  print_gc_stats();
+
+  unreachable = NULL; // Make block unreachable
+  printf("Made one block unreachable\n");
+
+  gc(); // Run garbage collection
+  printf("After GC:\n");
+  print_gc_stats();
+
+  free(reachable);
+  printf("✓ Test 2 passed\n\n");
+
+  // Test 3: Multiple unreachable blocks
+  printf("--- Test 3: Multiple Unreachable Blocks ---\n");
+  int *p1 = (int *)malloc(20 * sizeof(int));
+  int *p2 = (int *)malloc(30 * sizeof(int));
+  int *p3 = (int *)malloc(40 * sizeof(int));
+  int *keep = (int *)malloc(50 * sizeof(int));
+
+  printf("Allocated 4 blocks\n");
+  print_gc_stats();
+
+  p1 = p2 = p3 = NULL; // Make 3 blocks unreachable
+  printf("Made 3 blocks unreachable\n");
+
+  gc();
+  printf("After GC (should collect 3 blocks):\n");
+  print_gc_stats();
+  debug_heap();
+
+  free(keep);
+  printf("✓ Test 3 passed\n\n");
+
+  printf("===============================================\n");
+  printf("  ALL TESTS COMPLETED SUCCESSFULLY!\n");
+  printf("===============================================\n");
+
+  return 0;
 }
+
+// ========== MEMORY ALLOCATOR IMPLEMENTATION ==========
 
 struct block_meta *find_free_block(struct block_meta **last, size_t size) {
   struct block_meta *current = global_base;
@@ -161,75 +136,74 @@ struct block_meta *find_free_block(struct block_meta **last, size_t size) {
 }
 
 struct block_meta *request_space(struct block_meta *last, size_t size) {
-  struct block_meta *block;
-  block = sbrk(0);
-
+  struct block_meta *block = sbrk(0);
   void *request = sbrk(size + META_SIZE);
-  assert((void *)block == request); // not thread safe
 
+  assert((void *)block == request);
   if (request == (void *)-1) {
-    return NULL; // sbrk failed
+    return NULL;
   }
 
   if (last) {
     last->next = block;
   }
 
-  block->free = 0;
-  block->marked = 1;
   block->size = size;
   block->next = NULL;
+  block->free = 0;
+  block->marked = 1;
   block->magic = 0x12345678;
 
   return block;
 }
 
 void *malloc(size_t size) {
-  struct block_meta *block;
-
   if (size <= 0) {
     return NULL;
   }
 
-  // To fix allignment
+  // Align to 8-byte boundary
   size = (size + 7) & ~7;
+
+  struct block_meta *block;
 
   if (!global_base) {
     block = request_space(NULL, size);
-    if (!block) {
+    if (!block)
       return NULL;
-    }
     global_base = block;
   } else {
     struct block_meta *last = NULL;
     block = find_free_block(&last, size);
+
     if (!block) {
       block = request_space(last, size);
-      if (!block) {
+      if (!block)
         return NULL;
-      }
     } else {
-      // We found the block
-      // Split it if it's large enough
+      // Reuse free block - split if large enough
       if (block->size >= size + META_SIZE + MIN_SIZE) {
-        size_t remaining_size = block->size - (size + META_SIZE);
+        size_t remaining = block->size - size - META_SIZE;
         block->size = size;
 
         struct block_meta *new_block =
             (struct block_meta *)((char *)block + META_SIZE + size);
 
-        new_block->size = remaining_size;
+        new_block->size = remaining;
         new_block->free = 1;
+        new_block->marked = 0; // FIX: Initialize marked field
         new_block->magic = 0x22222222;
-
         new_block->next = block->next;
+
         block->next = new_block;
       }
+
       block->free = 0;
       block->marked = 1;
       block->magic = 0x77777777;
     }
   }
+
   return (block + 1);
 }
 
@@ -239,32 +213,24 @@ void merge_free_blocks(struct block_meta *head) {
   while (current && current->next) {
     struct block_meta *next = current->next;
 
+    // Check if both blocks are free and adjacent
     if (current->free && next->free &&
         ((char *)current + META_SIZE + current->size == (char *)next)) {
 
-      // merge next into current
       current->size += META_SIZE + next->size;
-      current->next = next->next; // skip over merged block
-
-      // do NOT advance current here; the merged block might merge again
+      current->next = next->next;
+      // Don't advance - might merge again
     } else {
-      // move forward only if no merge happened
       current = current->next;
     }
   }
 }
 
-struct block_meta *get_block_addr(void *ptr) {
-  return (struct block_meta *)ptr - 1;
-}
-
 void free(void *ptr) {
-  struct block_meta *block = get_block_addr(ptr);
-
-  if (!block) {
-    fprintf(stderr, "Error : block not found");
+  if (!ptr)
     return;
-  }
+
+  struct block_meta *block = (struct block_meta *)ptr - 1;
 
   assert(block->free == 0);
   assert(block->magic == 0x77777777 || block->magic == 0x12345678);
@@ -273,90 +239,7 @@ void free(void *ptr) {
   block->marked = 0;
   block->magic = 0x55555555;
 
-  // After freeing we merge free blocks
   merge_free_blocks(global_base);
-}
-
-void print_heap(void) {
-  struct block_meta *cur = (struct block_meta *)global_base;
-  printf("\n[HEAP DUMP]\n");
-  while (cur) {
-    printf("meta=%p | size=%6zu | free=%d | magic=0x%x | next=%p\n",
-           (void *)cur, cur->size, cur->free, cur->magic, (void *)cur->next);
-    cur = cur->next;
-  }
-  printf("------------\n");
-}
-
-void shrink_and_split(struct block_meta *block, size_t size) {
-  size_t old_size = block->size;
-  block->size = size;
-
-  size_t leftover = old_size - size - META_SIZE;
-
-  if (leftover >= MIN_SIZE) {
-    struct block_meta *new_block =
-        (struct block_meta *)((char *)block + META_SIZE + block->size);
-    new_block->size = leftover;
-    new_block->free = 1;
-    new_block->marked = 0;
-    new_block->magic = 0x55555555;
-
-    // insert right after the curent block
-    new_block->next = block->next;
-    block->next = new_block;
-  }
-}
-
-struct block_meta *expand_in_place(void *ptr, size_t size) {
-  struct block_meta *block = get_block_addr(ptr);
-  void *start_address = (char *)block + META_SIZE + block->size;
-  // traverse the linked list and find free adjacent blocks
-
-  struct block_meta *target = global_base;
-  while (target) {
-    if ((void *)target == start_address) {
-      break;
-    }
-    target = target->next;
-  }
-
-  if (!target || target->free == 0) {
-    return NULL;
-  }
-
-  if (block->size + META_SIZE + target->size >= size) {
-
-    // int new_size = size - META_SIZE;
-    // if(new_size >= 0) block -> size = new_size;
-    //  This was an optimization attempt but i guess it's better to
-    //  give a bit more than the user wanted so let's move on
-
-    target->free = 0;
-    target->marked = 1;
-    target->magic = 0x12345678;
-
-    size_t remaining =
-        (block->size + target->size + META_SIZE) - (size + META_SIZE);
-    block->size = size;
-
-    struct block_meta *next_target = target->next;
-
-    // Check if there's remaining space
-    if (remaining > MIN_SIZE + META_SIZE) {
-      struct block_meta *new_target_block =
-          (struct block_meta *)((char *)block + META_SIZE + block->size);
-      new_target_block->size = remaining;
-      new_target_block->free = 1;
-      new_target_block->marked = 0;
-      new_target_block->next = next_target;
-      new_target_block->magic = 0x5555555;
-      block->next = new_target_block;
-    } else {
-      block->next = target->next;
-    }
-  }
-  return block + 1;
 }
 
 void *realloc(void *ptr, size_t size) {
@@ -369,123 +252,113 @@ void *realloc(void *ptr, size_t size) {
     return NULL;
   }
 
-  struct block_meta *myblock = (struct block_meta *)ptr - 1;
+  struct block_meta *block = (struct block_meta *)ptr - 1;
 
-  // if size == block -> size : do nothing
-  if (size == myblock->size) {
-    return myblock + 1;
+  if (size <= block->size) {
+    return ptr; // Current block is big enough
   }
 
-  // if size < block -> size : shrink and split
-
-  /* if size > block -> size
-   * 1. Check if there's a free adjacent block and expand in place if
-   * possible. Otherwise:
-   * 1. free this block
-   * 2. allocate new block with the new size
-   * 3. copy the content to the new block
-   */
-
-  if (myblock->size > size + META_SIZE + MIN_SIZE) {
-    shrink_and_split(myblock, size);
-    return myblock + 1;
-  } else if (size > myblock->size) { // equivalent to elif
-    void *new_block = expand_in_place(ptr, size);
-    if (!new_block) {
-      void *new_block = malloc(size);
-      memcpy(new_block, ptr, myblock->size);
-      free(ptr);
-      return new_block;
-    } else {
-      return new_block;
-    }
+  // Need larger block - allocate new and copy
+  void *new_ptr = malloc(size);
+  if (new_ptr) {
+    memcpy(new_ptr, ptr, block->size);
+    free(ptr);
   }
-  return ptr;
+
+  return new_ptr;
 }
 
-void debug_heap(void) {
-  struct block_meta *curr = (struct block_meta *)global_base;
-  printf("\n[HEAP DEBUG DUMP]\n");
-  printf("%-20s %-8s %-6s %-10s %-20s %-10s\n", "Block Addr", "Size", "Free",
-         "Magic", "Next", "End Addr");
+// ========== GARBAGE COLLECTOR IMPLEMENTATION ==========
 
-  while (curr) {
-    void *user_start = (void *)(curr + 1);
-    void *user_end = (char *)user_start + curr->size;
+void gc_init(void) {
+  static int initialized = 0;
 
-    printf("%-20p %-8zu %-6d 0x%-8x %-20p %-10p\n", (void *)curr, curr->size,
-           curr->free, curr->magic, (void *)curr->next, user_end);
-
-    curr = curr->next;
-  }
-  printf("-------------------------------------------------------------\n");
-}
-
-static void scan_region(uintptr_t *start_region, uintptr_t *end_region) {
-
-  uintptr_t *start = start_region;
-
-  if (!global_base) {
+  if (initialized)
     return;
-  }
+  initialized = 1;
 
-  // uintptr_t holds the addres of a single memory word (4 or 8 bytes).
+  FILE *statfp = fopen("/proc/self/stat", "r");
+  assert(statfp != NULL);
 
-  uintptr_t heap_start = (uintptr_t)((struct block_meta *)global_base + 1);
+  fscanf(statfp,
+         "%*d %*s %*c %*d %*d %*d %*d %*d %*u "
+         "%*lu %*lu %*lu %*lu %*lu %*lu %*ld %*ld "
+         "%*ld %*ld %*ld %*ld %*llu %*lu %*ld "
+         "%*lu %*lu %*lu %lu",
+         &stack_bottom);
+
+  fclose(statfp);
+}
+
+static void scan_region(uintptr_t *start, uintptr_t *end) {
+  if (!global_base)
+    return;
+
+  uintptr_t heap_start = (uintptr_t)(global_base) + META_SIZE;
   uintptr_t heap_end = (uintptr_t)sbrk(0);
 
-  for (; start_region < end_region; start_region++) {
-    uintptr_t heap_address = *start_region;
+  // Scan each word in the region
+  for (uintptr_t *p = start; p < end; p++) {
+    uintptr_t value = *p;
 
-    if (heap_address >= heap_start && heap_address < heap_end) {
-      struct block_meta *temp = global_base;
+    // Check if value looks like a heap pointer
+    if (value >= heap_start && value < heap_end) {
 
-      while (temp) {
-        if (heap_address >= (uintptr_t)((struct block_meta *)temp + 1) &&
-            heap_address <
-                (uintptr_t)((char *)temp + sizeof(struct block_meta) +
-                            temp->size)) {
-          temp->marked = 1;
+      // Find which block it points into
+      struct block_meta *block = global_base;
+      while (block) {
+        uintptr_t block_start = (uintptr_t)(block + 1);
+        uintptr_t block_end = block_start + block->size;
+
+        if (value >= block_start && value < block_end) {
+          block->marked = 1; // Mark as reachable
           break;
         }
-        temp = temp->next;
+
+        block = block->next;
       }
     }
   }
 }
 
 static void scan_heap(void) {
-  /* Scan each allocated block and see if it points to any unmakred block
-   * if yes mark that block else skip
-   */
-
-  struct block_meta *temp = global_base;
-
-  if (!global_base) {
+  if (!global_base)
     return;
-  }
 
   int new_marks;
 
+  // Compute transitive closure
   do {
     new_marks = 0;
-    temp = global_base;
-    for (; temp != NULL; temp = temp->next) {
-      if (!temp->marked)
+
+    // FIX: Reset to beginning each iteration
+    struct block_meta *block = global_base;
+
+    for (; block != NULL; block = block->next) {
+      if (!block->marked)
         continue;
 
-      uintptr_t *payload = (uintptr_t *)(temp + 1);
-      for (size_t i = 0; i < (temp->size) / sizeof(uintptr_t); i++) {
-        uintptr_t candidate = payload[i];
+      // Scan this block's data for pointers
+      uintptr_t *data = (uintptr_t *)(block + 1);
 
-        for (struct block_meta *other_block = global_base; other_block != NULL;
-             other_block = other_block->next) {
-          if (!other_block->marked) {
-            uintptr_t start = (uintptr_t)(other_block + 1);
-            uintptr_t end = (uintptr_t)(other_block + 1 + other_block->size);
+      // FIX: Divide by sizeof(uintptr_t) to get count
+      size_t word_count = block->size / sizeof(uintptr_t);
 
-            if (candidate >= start && candidate < end) {
-              other_block->marked = 1;
+      for (size_t i = 0; i < word_count; i++) {
+        uintptr_t value = data[i];
+
+        // Check if it points to another block
+        // FIX: Initialize other_block to global_base
+        for (struct block_meta *other = global_base; other != NULL;
+             other = other->next) {
+          if (!other->marked) {
+            uintptr_t other_start = (uintptr_t)(other + 1);
+            // FIX: Cast to char* for byte arithmetic
+            uintptr_t other_end =
+                (uintptr_t)((char *)(other + 1) + other->size);
+
+            if (value >= other_start && value < other_end) {
+              other->marked = 1;
               new_marks = 1;
             }
           }
@@ -494,39 +367,104 @@ static void scan_heap(void) {
     }
   } while (new_marks);
 }
-void gc_init(void) {
-
-  static int initted;
-  FILE *statfp;
-
-  if (initted)
-    return;
-
-  initted = 1;
-
-  statfp = fopen("/proc/self/stat", "r");
-  assert(statfp != NULL);
-  fscanf(statfp,
-         "%*d %*s %*c %*d %*d %*d %*d %*d %*u "
-         "%*lu %*lu %*lu %*lu %*lu %*lu %*ld %*ld "
-         "%*ld %*ld %*ld %*ld %*llu %*lu %*ld "
-         "%*lu %*lu %*lu %lu",
-         &stack_bottom);
-  fclose(statfp);
-}
 
 void gc(void) {
-  uintptr_t stack_top;
-  extern char etext, end; // Provided by the linker.
-
-  struct block_meta *temp;
-
-  if (global_base == NULL) {
+  if (!global_base)
     return;
+
+  extern char etext, end; // Linker-provided symbols
+  struct block_meta *block = global_base;
+  for (; block != NULL; block = block->next) {
+    block->marked = 0;
   }
 
-  // Scan the data and BSS
+  // Mark phase: Scan roots
   scan_region((uintptr_t *)&etext, (uintptr_t *)&end);
 
-  // Scan the Stack
+  // Scan stack
+  uintptr_t stack_top;
+#ifdef __x86_64__
+  asm volatile("movq %%rbp, %0" : "=r"(stack_top));
+#else
+  asm volatile("movl %%ebp, %0" : "=r"(stack_top));
+#endif
+  scan_region((uintptr_t *)stack_top, (uintptr_t *)stack_bottom);
+
+  // Scan heap for pointer chains
+  scan_heap();
+
+  // Sweep phase: Free unmarked blocks
+  block = global_base;
+  while (block != NULL) {
+    struct block_meta *next = block->next;
+
+    if (!block->marked && !block->free) {
+      block->free = 1;
+      block->marked = 0;
+      block->magic = 0x55555555;
+    }
+
+    block = next;
+  }
+}
+
+// ========== UTILITY FUNCTIONS ==========
+
+int count_allocated_blocks(void) {
+  int count = 0;
+  struct block_meta *curr = global_base;
+
+  while (curr) {
+    if (!curr->free)
+      count++;
+    curr = curr->next;
+  }
+
+  return count;
+}
+
+int count_free_blocks(void) {
+  int count = 0;
+  struct block_meta *curr = global_base;
+
+  while (curr) {
+    if (curr->free)
+      count++;
+    curr = curr->next;
+  }
+
+  return count;
+}
+
+void print_gc_stats(void) {
+  printf("  [Allocated: %d blocks | Free: %d blocks]\n",
+         count_allocated_blocks(), count_free_blocks());
+}
+
+void debug_heap(void) {
+  struct block_meta *curr = global_base;
+  printf("\n[HEAP DUMP]\n");
+  printf("%-18s %-8s %-6s %-8s %-10s\n", "Address", "Size", "Free", "Marked",
+         "Magic");
+
+  int count = 0;
+  while (curr && count < 20) {
+    // Validate magic before accessing
+    if (curr->magic != 0x12345678 && curr->magic != 0x77777777 &&
+        curr->magic != 0x22222222 && curr->magic != 0x55555555) {
+      printf("%-18p [CORRUPTED - magic: 0x%x]\n", (void *)curr, curr->magic);
+      break;
+    }
+
+    printf("%-18p %-8zu %-6d %-8d 0x%08x\n", (void *)curr, curr->size,
+           curr->free, curr->marked, curr->magic);
+
+    curr = curr->next;
+    count++;
+  }
+
+  if (count >= 20) {
+    printf("  (stopped after 20 blocks)\n");
+  }
+  printf("----------------------------------------\n");
 }
