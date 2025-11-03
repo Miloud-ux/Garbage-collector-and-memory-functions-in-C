@@ -123,6 +123,47 @@ is small enough the OS may not extend the heap repeatedly. Instead it may extend
 silently (internally) without modifying the meta blocks so when `sbrk()` is called again we don't need to extend the heap
 to avoid costly system calls.
 
+ - - - 
+# Part two : Garbage collector
+The simple stop the world mark and sweep algorithm :
+  1. Check if variables (global, stack)  points to a block in the heap and **mark** it.
+  2. Traverse the list of allocated blocks and free all unmarked blocks.
+
+**Tasks**:
+- [x] Add the marked filed and modify the code if needed.
+- [x] Scan the stack
+- [x] Scan the heap (easier)
+- [x] Scan the BSS and Data segments
+
+## Stack scanning
+The stack grows downward on x86/x86_64 meaning the Bottom of the stack contains the highest addresses going
+down decreases it Scanning the stack Consists of finding the top of it which is some simple assembly since it's
+stored in the `%rbp` register however finding the bottom is a bit tricky since the kernel randomizes the bottom 
+of the stack for security reasons so there's some approaches we can follow :
+  
+1. use `envp` pointer to start guessing the stack bottom since it starts with the process.
+2. Use **SIGSEGV** which means start from the top and keep scanning upward until you hit unmapped memory page 
+  in which the kernel would signal **SIGSEGV** catch the error and stop.
+3. Linux puts the bottom of the stack in a string in a file in the process’s entry in the proc directory
+  `/proc/self/stat` (we're gonna use this one)
+
+>  The tutorial guy
+>This sounds silly and terribly indirect. Fortunately, I don’t feel ridiculous for doing doing it because
+>it’s literally the exact same thing Boehm GC does to find the bottom of the stack!
+
+## BSS and Data segments
+This one kinda easier because we already have predefined macros :
+- `&etext` : Start of Initialized data segment
+- `&end` : End of the heap 
+
+So we can scan from `&etext` -> `&end` and we're done :)
+
+## Scanning the heap
+Scanning the heap requires traversing our list of allocated blocks because the heap isn't contiguous in 
+modern malloc implementation that uses `mmap`. Although our implementation only uses `sbrk()` so that should
+not be a problem anyways.
+
+
 
 
 
