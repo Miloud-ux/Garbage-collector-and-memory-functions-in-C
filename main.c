@@ -19,8 +19,10 @@ struct block_meta {
   int marked; // for the GC
   int magic;  // for debugging
 };
+
 // Head of the linked list to track all allocated blocks.
 void *global_base = NULL;
+unsigned long stack_bottom = 0;
 
 // === Functions ===
 
@@ -40,9 +42,12 @@ void shrink_and_split(struct block_meta *block, size_t size);
 struct block_meta *expand_in_place(void *ptr, size_t size);
 
 // === Garbage Collector ===
-// Function to scan the Stack,BSS and data segment.
-static void scan_region(uintptr_t *start_region, uintptr_t *end_region);
-static void scan_heap(void);
+static void
+scan_region(uintptr_t *start_region,
+            uintptr_t *end_region); // Scan the stack and BSS segment
+static void scan_heap(void);        // scan the heap
+void gc_init(void);
+void gc(void);
 
 // == Debugging ==
 void print_heap(void);
@@ -488,4 +493,40 @@ static void scan_heap(void) {
       }
     }
   } while (new_marks);
+}
+void gc_init(void) {
+
+  static int initted;
+  FILE *statfp;
+
+  if (initted)
+    return;
+
+  initted = 1;
+
+  statfp = fopen("/proc/self/stat", "r");
+  assert(statfp != NULL);
+  fscanf(statfp,
+         "%*d %*s %*c %*d %*d %*d %*d %*d %*u "
+         "%*lu %*lu %*lu %*lu %*lu %*lu %*ld %*ld "
+         "%*ld %*ld %*ld %*ld %*llu %*lu %*ld "
+         "%*lu %*lu %*lu %lu",
+         &stack_bottom);
+  fclose(statfp);
+}
+
+void gc(void) {
+  uintptr_t stack_top;
+  extern char etext, end; // Provided by the linker.
+
+  struct block_meta *temp;
+
+  if (global_base == NULL) {
+    return;
+  }
+
+  // Scan the data and BSS
+  scan_region((uintptr_t *)&etext, (uintptr_t *)&end);
+
+  // Scan the Stack
 }
